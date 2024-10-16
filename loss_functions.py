@@ -120,3 +120,50 @@ def initialize_hji_air3D(dataset, minWith):
                 'diff_constraint_hom': torch.abs(diff_constraint_hom).sum()}
 
     return hji_air3D
+
+
+def initialize_PE_1v1(dataset, minWith):
+    # Initialize the loss function for the air3D problem
+    # The dynamics parameters
+    vel_pursuer = dataset.vel_pursuer
+    vel_evader = dataset.vel_evader
+
+    def PE_1v1(model_output, gt):
+        source_boundary_values = gt['source_boundary_values']
+        x = model_output['model_in']  # (meta_batch_size, num_points, 4)
+        y = model_output['model_out']  # (meta_batch_size, num_points, 1)
+        dirichlet_mask = gt['dirichlet_mask']
+        batch_size = x.shape[1]
+
+        du, status = diff_operators.jacobian(y, x)
+        dudt = du[..., 0, 0]
+        dudx = du[..., 0, 1:]
+
+        # Pursuer 1v1 dynamics
+        # \dot x_p    = v_p p_x
+        # \dot y_p    = v_p p_y
+        # \dot x_e    = v_e e_x
+        # \dot y_e    = v_e e_y
+
+        # Compute the hamiltonian for the ego vehicle H = v_p*sqrt(p_1^2 + p_2^2) - v_e*sqrt(p_3^2 + p_4^2)
+        ham = vel_pursuer*torch.sqrt(torch.square(dudx[..., 0]) + torch.square(dudx[..., 1])) # V_p componenet
+        ham = ham - vel_evader*torch.sqrt(torch.square(dudx[..., 2]) + torch.square(dudx[..., 3])) # V_e componenet
+
+        # If we are computing BRT then take min with zero
+        if minWith == 'zero':
+            ham = torch.clamp(ham, max=0.0)
+
+        if torch.all(dirichlet_mask):
+            diff_constraint_hom = torch.Tensor([0])
+        else:
+            diff_constraint_hom = dudt - ham
+            if minWith == 'target':
+                diff_constraint_hom = torch.max(diff_constraint_hom[:, :, None], y - source_boundary_values)
+
+        dirichlet = y[dirichlet_mask] - source_boundary_values[dirichlet_mask]
+
+        # A factor of 15e2 to make loss roughly equal
+        return {'dirichlet': torch.abs(dirichlet).sum() * batch_size / 15e2,
+                'diff_constraint_hom': torch.abs(diff_constraint_hom).sum()}
+
+    return PE_1v1
